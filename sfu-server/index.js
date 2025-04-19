@@ -40,6 +40,13 @@ const clientMediaType = {};
 
 // WebSocket 시그널링 기본 구조
 wss.on('connection', (ws) => {
+  // 클라이언트가 연결되면 routerRtpCapabilities 전송
+  if (router) {
+    ws.send(JSON.stringify({
+      type: 'routerRtpCapabilities',
+      rtpCapabilities: router.rtpCapabilities
+    }));
+  }
   let clientId;
   ws.on('message', async (message) => {
     let data;
@@ -110,20 +117,34 @@ wss.on('connection', (ws) => {
 
     // connect-transport: 클라이언트의 DTLS 파라미터를 transport에 적용
     if (data.type === 'connect-transport' && transports[clientId]) {
-      await transports[clientId].connect({ dtlsParameters: data.dtlsParameters });
-      ws.send(JSON.stringify({ type: 'transport-connected' }));
+      const transport = transports[clientId];
+      if (!transport._connected) {
+        await transport.connect({ dtlsParameters: data.dtlsParameters });
+        transport._connected = true;
+        ws.send(JSON.stringify({ type: 'transport-connected' }));
+      } else {
+        ws.send(JSON.stringify({ type: 'transport-already-connected' }));
+      }
     }
 
     // 예시: 송출자(A)가 producer 생성 요청 시
     if (data.type === 'produce' && clientId === 'A') {
-      // kind: 'audio' 또는 'video' 구분
-      const producer = await transports[clientId].produce({
-        kind: data.kind,
-        rtpParameters: data.rtpParameters,
-      });
-      if (!producers[clientId]) producers[clientId] = {};
-      producers[clientId][data.kind] = producer;
-      ws.send(JSON.stringify({ type: 'produced', kind: data.kind, id: producer.id }));
+      try {
+        if (!data.rtpParameters || !data.rtpParameters.codecs) {
+          ws.send(JSON.stringify({ type: 'error', message: 'produce: missing rtpParameters.codecs' }));
+          return;
+        }
+        const producer = await transports[clientId].produce({
+          kind: data.kind,
+          rtpParameters: data.rtpParameters,
+        });
+        if (!producers[clientId]) producers[clientId] = {};
+        producers[clientId][data.kind] = producer;
+        ws.send(JSON.stringify({ type: 'produced', kind: data.kind, id: producer.id }));
+      } catch (err) {
+        ws.send(JSON.stringify({ type: 'error', message: 'produce failed: ' + err.message }));
+        console.error('produce error:', err);
+      }
     }
 
     // 예시: 수신자(B/C/D)가 consumer 생성 요청 시

@@ -69,7 +69,12 @@ function App() {
   // WebSocket 연결 및 시그널링 예시
   const connectSignaling = () => {
     if (wsRef.current) wsRef.current.close();
-    const ws = new window.WebSocket('ws://localhost:4000');
+    // 환경에 따라 WebSocket 주소 분기
+    const wsUrl =
+      window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+        ? 'ws://localhost:4000'
+        : 'ws://sfu-server:4000';
+    const ws = new window.WebSocket(wsUrl);
     ws.onopen = () => setWsStatus('connected');
     ws.onclose = () => setWsStatus('disconnected');
     ws.onmessage = (msg) => {
@@ -224,6 +229,8 @@ function App() {
           video: !!data.video,
         });
         // TODO: 수신 트랙을 PeerConnection에 연결
+      } else if (data.type === 'routerRtpCapabilities') {
+        setRouterRtpCapabilities(data.rtpCapabilities);
       }
       // ...기타 메시지 처리...
     };
@@ -247,41 +254,89 @@ function App() {
   const [produced, setProduced] = useState({ audio: false, video: false });
   const [consumed, setConsumed] = useState({ audio: false, video: false });
   const [device, setDevice] = useState(null);
+  const [routerRtpCapabilities, setRouterRtpCapabilities] = useState(null);
+  const [deviceLoaded, setDeviceLoaded] = useState(false);
 
-  // mediasoup Device 생성 및 rtpCapabilities 서버 전송
+  // mediasoup Device 생성 및 load
   useEffect(() => {
-    if (wsStatus !== 'connected') return;
-    const loadDevice = async () => {
-      const dev = new Device();
-      setDevice(dev);
-      // 서버에 rtpCapabilities 전송(consume용)
-      if (wsRef.current && dev.rtpCapabilities) {
-        wsRef.current.send(JSON.stringify({
-          type: 'rtpCapabilities',
-          client: selectedClient,
-          rtpCapabilities: dev.rtpCapabilities,
-        }));
-      }
-    };
-    loadDevice();
+    if (!routerRtpCapabilities) return;
+    const dev = new Device();
+    dev.load({ routerRtpCapabilities })
+      .then(() => {
+        setDevice(dev);
+        setDeviceLoaded(true);
+        // 서버에 rtpCapabilities 전송(consume용)
+        if (wsRef.current && dev.rtpCapabilities) {
+          wsRef.current.send(JSON.stringify({
+            type: 'rtpCapabilities',
+            client: selectedClient,
+            rtpCapabilities: dev.rtpCapabilities,
+          }));
+        }
+      })
+      .catch((err) => {
+        setDeviceLoaded(false);
+        setDevice(null);
+        console.error('mediasoup Device load 실패:', err);
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsStatus, selectedClient]);
+  }, [routerRtpCapabilities, selectedClient]);
 
   // transport 생성 및 연결, produce/consume 자동화 예시
   useEffect(() => {
-    if (!device || !transportParams) return;
+    if (!wsStatus === 'connected') return;
+    if (!deviceLoaded || !device || !transportParams) return;
     let transport;
     if (isSender) {
       // 송출자: send transport 생성
       transport = device.createSendTransport(transportParams);
+      transport.on('connect', ({ dtlsParameters }, callback, errback) => {
+        if (wsRef.current && wsRef.current.readyState === 1) {
+          wsRef.current.send(JSON.stringify({
+            type: 'connect-transport',
+            client: selectedClient,
+            dtlsParameters,
+          }));
+          callback();
+        } else {
+          errback(new Error('WebSocket not connected'));
+        }
+      });
+      transport.on('produce', async ({ kind, rtpParameters }, callback, errback) => {
+        if (wsRef.current && wsRef.current.readyState === 1) {
+          wsRef.current.send(JSON.stringify({
+            type: 'produce',
+            client: selectedClient,
+            kind,
+            rtpParameters
+          }));
+          callback({ id: `${kind}-producer-id` });
+        } else {
+          errback(new Error('WebSocket not connected'));
+        }
+      });
       if (localStream) {
         localStream.getTracks().forEach(track => {
-          transport.produce({ track });
+          if (!produced[track.kind]) {
+            transport.produce({ track });
+          }
         });
       }
     } else {
       // 수신자: recv transport 생성
       transport = device.createRecvTransport(transportParams);
+      transport.on('connect', ({ dtlsParameters }, callback, errback) => {
+        if (wsRef.current && wsRef.current.readyState === 1) {
+          wsRef.current.send(JSON.stringify({
+            type: 'connect-transport',
+            client: selectedClient,
+            dtlsParameters,
+          }));
+          callback();
+        } else {
+          errback(new Error('WebSocket not connected'));
+        }
+      });
       // 서버에 consume 요청
       if (wsRef.current) {
         wsRef.current.send(JSON.stringify({
@@ -290,59 +345,93 @@ function App() {
           rtpCapabilities: device.rtpCapabilities,
         }));
       }
+      // 서버에서 consumed 응답 시 consumer 생성 및 트랙 연결
+      wsRef.current.onmessage = async (msg) => {
+        const data = JSON.parse(msg.data);
+        if (data.type === 'consumed') {
+          if (data.audio) {
+            const audioConsumer = await transport.consume({
+              id: data.audio.id,
+              producerId: data.audio.producerId,
+              kind: 'audio',
+              rtpParameters: data.audio.rtpParameters,
+            });
+            const remoteStream = new MediaStream([audioConsumer.track]);
+            setRemoteStream(remoteStream);
+          }
+          if (data.video) {
+            const videoConsumer = await transport.consume({
+              id: data.video.id,
+              producerId: data.video.producerId,
+              kind: 'video',
+              rtpParameters: data.video.rtpParameters,
+            });
+            const remoteStream = new MediaStream([videoConsumer.track]);
+            setRemoteStream(remoteStream);
+          }
+        }
+      };
     }
     // TODO: transport 이벤트 핸들링 및 트랙 연결
     // 예: transport.on('connect', ...), transport.on('produce', ...)
     // 예: consumer.on('track', ...)
     // ...
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [device, transportParams, localStream, isSender]);
+  }, [wsStatus, deviceLoaded, device, transportParams, localStream, isSender]);
 
   // mediasoup transport/produce/consume 자동화 및 이벤트 핸들링
   useEffect(() => {
-    if (!device || !transportParams) return;
+    if (!deviceLoaded || !device || !transportParams) return;
     let transport;
     if (isSender) {
       // 송출자: send transport 생성
       transport = device.createSendTransport(transportParams);
       transport.on('connect', ({ dtlsParameters }, callback, errback) => {
-        if (wsRef.current) {
+        if (wsRef.current && wsRef.current.readyState === 1) {
           wsRef.current.send(JSON.stringify({
             type: 'connect-transport',
             client: selectedClient,
             dtlsParameters,
           }));
+          callback();
+        } else {
+          errback(new Error('WebSocket not connected'));
         }
-        callback();
       });
       transport.on('produce', async ({ kind, rtpParameters }, callback, errback) => {
-        if (wsRef.current) {
+        if (wsRef.current && wsRef.current.readyState === 1) {
           wsRef.current.send(JSON.stringify({
             type: 'produce',
             client: selectedClient,
             kind,
-            rtpParameters,
+            rtpParameters
           }));
+          callback({ id: `${kind}-producer-id` });
+        } else {
+          errback(new Error('WebSocket not connected'));
         }
-        callback({ id: `${kind}-producer-id` }); // 실제 id는 서버 응답 필요
       });
       if (localStream) {
         localStream.getTracks().forEach(track => {
-          transport.produce({ track });
+          if (!produced[track.kind]) {
+            transport.produce({ track });
+          }
         });
       }
     } else {
       // 수신자: recv transport 생성
       transport = device.createRecvTransport(transportParams);
       transport.on('connect', ({ dtlsParameters }, callback, errback) => {
-        if (wsRef.current) {
+        if (wsRef.current && wsRef.current.readyState === 1) {
           wsRef.current.send(JSON.stringify({
             type: 'connect-transport',
             client: selectedClient,
             dtlsParameters,
           }));
+          callback();
+        } else {
+          errback(new Error('WebSocket not connected'));
         }
-        callback();
       });
       // 서버에 consume 요청
       if (wsRef.current) {
@@ -381,7 +470,7 @@ function App() {
     }
     // ...기존 useEffect cleanup 등...
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [device, transportParams, localStream, isSender]);
+  }, [deviceLoaded, device, transportParams, localStream, isSender]);
 
   // transport 생성 요청
   const createTransport = () => {
