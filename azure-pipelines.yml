@@ -1,0 +1,51 @@
+# Azure DevOps 파이프라인 예시: SFU 서버, 프론트엔드, coturn 컨테이너 빌드 및 배포
+trigger:
+  - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  imageRepository: 'webrtc-sfu'
+  dockerRegistryServiceConnection: 'YOUR_AZURE_CONTAINER_REGISTRY_CONNECTION'
+  tag: '$(Build.BuildId)'
+
+stages:
+  - stage: Build
+    displayName: Build and Push Images
+    jobs:
+      - job: Build
+        steps:
+          - task: DockerCompose@0
+            displayName: Build and push images
+            inputs:
+              containerregistrytype: 'Azure Container Registry'
+              azureSubscription: '$(dockerRegistryServiceConnection)'
+              azureContainerRegistry: 'YOUR_AZURE_CONTAINER_REGISTRY.azurecr.io'
+              dockerComposeFile: '**/docker-compose.yml'
+              action: 'Build services'
+              additionalImageTags: '$(tag)'
+              includeSourceTags: true
+              includeLatestTag: true
+
+  - stage: Deploy
+    displayName: Deploy to Azure Container Instances
+    dependsOn: Build
+    jobs:
+      - job: Deploy
+        steps:
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: '$(dockerRegistryServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az container create \
+                  --resource-group YOUR_RESOURCE_GROUP \
+                  --name webrtc-sfu \
+                  --image YOUR_AZURE_CONTAINER_REGISTRY.azurecr.io/webrtc-sfu_frontend:$(tag) \
+                  --image YOUR_AZURE_CONTAINER_REGISTRY.azurecr.io/webrtc-sfu_sfu-server:$(tag) \
+                  --image instrumentisto/coturn \
+                  --dns-name-label webrtc-sfu-$(tag) \
+                  --ports 5173 4000 3478 \
+                  --environment-variables NODE_ENV=production
