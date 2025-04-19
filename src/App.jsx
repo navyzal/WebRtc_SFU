@@ -14,9 +14,17 @@ const MEDIA_TYPES = [
   { value: 'audio+video', label: '오디오+비디오' },
 ];
 
+function getSenderRole() {
+  return import.meta.env.VITE_SENDER_ROLE || window?.SENDER_ROLE || null;
+}
+
 function App() {
-  const [selectedClient, setSelectedClient] = useState('B');
-  const [mediaType, setMediaType] = useState('audio');
+  // SENDER_ROLE 환경변수 감지 (컨테이너에서 전달)
+  const senderRole = getSenderRole();
+  // sender-a 컨테이너에서는 자동으로 A 역할, 오디오+비디오 고정
+  const isSenderA = senderRole === 'A';
+  const [selectedClient, setSelectedClient] = useState(isSenderA ? 'A' : 'B');
+  const [mediaType, setMediaType] = useState(isSenderA ? 'audio+video' : 'audio');
   const [wsStatus, setWsStatus] = useState('disconnected');
   const wsRef = useRef(null);
   const [localStream, setLocalStream] = useState(null);
@@ -26,7 +34,7 @@ function App() {
   const remoteVideoRef = useRef(null);
 
   // 역할이 A(송출자)일 때만 미디어 캡처, B/C/D는 수신만(미리보기 없음)
-  const isSender = selectedClient === 'A';
+  const isSender = isSenderA || selectedClient === 'A';
 
   // TURN 사용 여부를 환경변수 또는 UI로 제어할 수 있도록 state 추가
   const [useTurn, setUseTurn] = useState(false); // 기본값: false (STUN만 사용)
@@ -226,6 +234,14 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wsStatus, localStream, isSender, mediaType, selectedClient]);
 
+  // sender-a 컨테이너에서는 시그널링 자동 연결
+  useEffect(() => {
+    if (isSenderA && wsStatus !== 'connected') {
+      connectSignaling();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSenderA, wsStatus]);
+
   // transport, producer, consumer 상태
   const [transportParams, setTransportParams] = useState(null);
   const [produced, setProduced] = useState({ audio: false, video: false });
@@ -400,21 +416,27 @@ function App() {
   return (
     <div className="App">
       <h1>WebRTC SFU 테스트 클라이언트</h1>
-      <div>
-        <label>클라이언트 역할 선택: </label>
-        <select value={selectedClient} onChange={e => setSelectedClient(e.target.value)}>
-          {CLIENTS.map(c => (
-            <option key={c.id} value={c.id}>{c.label}</option>
-          ))}
-        </select>
-      </div>
+      {!isSenderA && (
+        <div>
+          <label>클라이언트 역할 선택: </label>
+          <select value={selectedClient} onChange={e => setSelectedClient(e.target.value)}>
+            {CLIENTS.map(c => (
+              <option key={c.id} value={c.id}>{c.label}</option>
+            ))}
+          </select>
+        </div>
+      )}
       <div>
         <label>미디어 타입 선택: </label>
-        <select value={mediaType} onChange={handleMediaTypeChange}>
-          {MEDIA_TYPES.map(m => (
-            <option key={m.value} value={m.value}>{m.label}</option>
-          ))}
-        </select>
+        {isSenderA ? (
+          <span>오디오+비디오 (고정)</span>
+        ) : (
+          <select value={mediaType} onChange={handleMediaTypeChange}>
+            {MEDIA_TYPES.map(m => (
+              <option key={m.value} value={m.value}>{m.label}</option>
+            ))}
+          </select>
+        )}
       </div>
       <div style={{ margin: '1em 0' }}>
         <button onClick={connectSignaling} disabled={wsStatus === 'connected'}>

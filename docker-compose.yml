@@ -1,6 +1,7 @@
 # 'version' 속성 없음 (Compose v2)
 services:
   sfu-server:
+    container_name: webrtc-sfu-server
     build: ./sfu-server
     ports:
       - "4000:4000"
@@ -9,14 +10,17 @@ services:
     depends_on:
       - coturn
   frontend:
+    container_name: webrtc-frontend
     build: .
     ports:
       - "5173:5173"
     environment:
       - NODE_ENV=production
+      - VITE_PORT=5173
     depends_on:
       - sfu-server
   coturn:
+    container_name: webrtc-coturn
     image: instrumentisto/coturn
     restart: always
     ports:
@@ -26,3 +30,14 @@ services:
       - TURN_SECRET=supersecret
     command: >
       --lt-cred-mech --no-cli --no-tls --no-dtls --user testuser:testpass --realm=webrtc.local --external-ip=${PUBLIC_IP}
+  sender-a:
+    container_name: webrtc-sender-a
+    build: .
+    ports:
+      - "5175:5175"
+    environment:
+      - NODE_ENV=production
+      - VITE_SENDER_ROLE=A
+      - VITE_PORT=5175
+    depends_on:
+      - sfu-server
