@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webrtc-sender-a
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webrtc-sender-a
+  template:
+    metadata:
+      labels:
+        app: webrtc-sender-a
+    spec:
+      containers:
+      - name: webrtc-sender-a
+        image: webrtcsfu.azurecr.io/webrtc-sender-a:latest
+        ports:
+        - containerPort: 5175
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: VITE_SENDER_ROLE
+          value: "A"
+        - name: VITE_PORT
+          value: "5175"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webrtc-sender-a
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 5175
+    targetPort: 5175
+  selector:
+    app: webrtc-sender-a

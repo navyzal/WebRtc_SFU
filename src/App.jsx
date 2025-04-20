@@ -108,14 +108,23 @@ function App() {
     else if (mediaType === 'video') constraints = { audio: false, video: true };
     else constraints = { audio: true, video: true };
 
-    navigator.mediaDevices.getUserMedia(constraints)
-      .then(stream => {
-        setLocalStream(stream);
-      })
-      .catch(err => {
-        setLocalStream(null);
-        console.error('미디어 획득 실패:', err);
-      });
+    if (
+      typeof navigator !== 'undefined' &&
+      navigator.mediaDevices &&
+      typeof navigator.mediaDevices.getUserMedia === 'function'
+    ) {
+      navigator.mediaDevices.getUserMedia(constraints)
+        .then(stream => {
+          setLocalStream(stream);
+        })
+        .catch(err => {
+          setLocalStream(null);
+          console.error('미디어 획득 실패:', err);
+        });
+    } else {
+      setLocalStream(null);
+      console.error('getUserMedia를 지원하지 않는 환경입니다.');
+    }
     // 정리: 이전 스트림 정지
     return () => {
       if (localStream) {

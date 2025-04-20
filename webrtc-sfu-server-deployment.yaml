@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webrtc-sfu-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webrtc-sfu-server
+  template:
+    metadata:
+      labels:
+        app: webrtc-sfu-server
+    spec:
+      containers:
+      - name: webrtc-sfu-server
+        image: webrtcsfu.azurecr.io/webrtc-sfu-server:latest
+        ports:
+        - containerPort: 4000
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: PUBLIC_IP
+          value: "20.249.161.77"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webrtc-sfu-server
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 4000
+    targetPort: 4000
+  selector:
+    app: webrtc-sfu-server

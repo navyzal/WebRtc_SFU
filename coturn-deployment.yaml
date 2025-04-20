@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coturn
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: coturn
+  template:
+    metadata:
+      labels:
+        app: coturn
+    spec:
+      containers:
+      - name: coturn
+        image: instrumentisto/coturn:latest
+        args:
+          - --lt-cred-mech
+          - --no-cli
+          - --no-tls
+          - --no-dtls
+          - --user
+          - testuser:testpass
+          - --realm=webrtc.local
+          - --external-ip=$(PUBLIC_IP)
+        env:
+        - name: PUBLIC_IP
+          value: "20.214.122.119"
+        ports:
+        - containerPort: 3478
+        - containerPort: 3478
+          protocol: UDP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coturn
+spec:
+  type: LoadBalancer
+  ports:
+    - name: coturn-tcp
+      port: 3478
+      targetPort: 3478
+      protocol: TCP
+    - name: coturn-udp
+      port: 3478
+      targetPort: 3478
+      protocol: UDP
+  selector:
+    app: coturn
