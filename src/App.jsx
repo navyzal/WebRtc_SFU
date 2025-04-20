@@ -1,530 +1,186 @@
 import React, { useState, useRef, useEffect } from 'react';
 import './App.css';
-import { Device } from 'mediasoup-client';
-
-const CLIENTS = [
-  { id: 'B', label: 'B (오디오만)' },
-  { id: 'C', label: 'C (비디오만)' },
-  { id: 'D', label: 'D (오디오+비디오)' },
-];
-
-const MEDIA_TYPES = [
-  { value: 'audio', label: '오디오만' },
-  { value: 'video', label: '비디오만' },
-  { value: 'audio+video', label: '오디오+비디오' },
-];
-
-function getSenderRole() {
-  return import.meta.env.VITE_SENDER_ROLE || window?.SENDER_ROLE || null;
-}
+import useWebRTC from './hooks/useWebRTC';
+import useMediasoup from './hooks/useMediasoup';
+import Notification from './components/Notification';
+import { 
+  CLIENTS, 
+  MEDIA_TYPES, 
+  getSenderRole,
+  APP_VERSION 
+} from './config';
 
 function App() {
   // SENDER_ROLE 환경변수 감지 (컨테이너에서 전달)
   const senderRole = getSenderRole();
+  
   // sender-a 컨테이너에서는 자동으로 A 역할, 오디오+비디오 고정
   const isSenderA = senderRole === 'A';
-  const [selectedClient, setSelectedClient] = useState(isSenderA ? 'A' : 'B');
-  const [mediaType, setMediaType] = useState(isSenderA ? 'audio+video' : 'audio');
-  const [wsStatus, setWsStatus] = useState('disconnected');
-  const wsRef = useRef(null);
-  const [localStream, setLocalStream] = useState(null);
+  
+  // 로컬 스토리지에서 이전 선택한 클라이언트와 미디어 타입 로드
+  const getInitialClient = () => {
+    if (isSenderA) return 'A';
+    const saved = localStorage.getItem('selectedClient');
+    return saved || 'B';
+  };
+  
+  const getInitialMediaType = () => {
+    if (isSenderA) return 'audio+video';
+    const saved = localStorage.getItem('mediaType');
+    return saved || 'audio';
+  };
+  
+  const [selectedClient, setSelectedClient] = useState(getInitialClient());
+  const [mediaType, setMediaType] = useState(getInitialMediaType());
+  
+  // 알림 상태
+  const [notification, setNotification] = useState({
+    show: false,
+    type: 'info',
+    title: '',
+    message: ''
+  });
+  
+  // 비디오 엘리먼트 참조
   const videoRef = useRef(null);
-  // 수신자(B/C/D)용 remoteStream 상태 및 미디어 표시
-  const [remoteStream, setRemoteStream] = useState(null);
   const remoteVideoRef = useRef(null);
 
   // 역할이 A(송출자)일 때만 미디어 캡처, B/C/D는 수신만(미리보기 없음)
   const isSender = isSenderA || selectedClient === 'A';
 
-  // TURN 사용 여부를 환경변수 또는 UI로 제어할 수 있도록 state 추가
-  const [useTurn, setUseTurn] = useState(false); // 기본값: false (STUN만 사용)
-
-  // ICE 서버 설정: STUN만 또는 STUN+TURN 동적 선택
-  const ICE_SERVERS = useTurn
-    ? [
-        { urls: 'stun:stun.l.google.com:19302' },
-        {
-          urls: 'turn:coturn:3478', // docker-compose coturn 서비스명 사용
-          username: 'testuser',
-          credential: 'testpass',
-        },
-      ]
-    : [
-        { urls: 'stun:stun.l.google.com:19302' },
-      ];
-
-  // PeerConnection 예시 (실제 offer/answer, 트랙 송수신 로직은 추후 구현)
-  const pcRef = useRef(null);
-
-  const createPeerConnection = () => {
-    if (pcRef.current) {
-      pcRef.current.close();
-    }
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    pcRef.current = pc;
-    // TODO: 트랙 추가/수신, 시그널링 메시지 송수신 등 구현 예정
-    return pc;
+  // 오류 처리 함수
+  const handleError = (title, message) => {
+    console.error(`${title}: ${message}`);
+    setNotification({
+      show: true,
+      type: 'error',
+      title,
+      message: typeof message === 'object' ? message.message || JSON.stringify(message) : message
+    });
   };
 
-  // WebSocket 연결 및 시그널링 예시
-  const connectSignaling = () => {
-    if (wsRef.current) wsRef.current.close();
-    // 환경에 따라 WebSocket 주소 분기
-    const wsUrl =
-      window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-        ? 'ws://localhost:4000'
-        : 'ws://sfu-server:4000';
-    const ws = new window.WebSocket(wsUrl);
-    ws.onopen = () => setWsStatus('connected');
-    ws.onclose = () => setWsStatus('disconnected');
-    ws.onmessage = (msg) => {
-      // TODO: 시그널링 메시지 처리
-      console.log('시그널링 수신:', msg.data);
-    };
-    wsRef.current = ws;
+  // 알림 표시 함수
+  const showNotification = (type, title, message) => {
+    setNotification({
+      show: true,
+      type,
+      title,
+      message
+    });
   };
 
-  // 미디어 타입 변경 시 서버에 알림 (예시)
+  // 알림 닫기 함수
+  const closeNotification = () => {
+    setNotification(prev => ({ ...prev, show: false }));
+  };
+  
+  // mediasoup 훅 사용 (SFU 방식)
+  const mediasoup = useMediasoup({
+    clientId: selectedClient,
+    mediaType,
+    onStatusChange: (status) => {
+      console.log('WebSocket 상태 변경:', status);
+      if (status === 'connected') {
+        showNotification('success', '연결 성공', '시그널링 서버에 연결되었습니다.');
+      } else if (status === 'disconnected') {
+        showNotification('warning', '연결 종료', '시그널링 서버와의 연결이 종료되었습니다.');
+      } else if (status === 'error') {
+        showNotification('error', '연결 오류', '시그널링 서버와의 연결에 문제가 발생했습니다.');
+      }
+    },
+    onError: handleError
+  });
+
+  // WebRTC 훅 사용 (P2P 방식)
+  const webrtc = useWebRTC({
+    clientId: selectedClient,
+    mediaType,
+    onStatusChange: (status) => {
+      console.log('WebSocket 상태 변경:', status);
+      if (status === 'connected') {
+        showNotification('success', '연결 성공', '시그널링 서버에 연결되었습니다.');
+      } else if (status === 'disconnected') {
+        showNotification('warning', '연결 종료', '시그널링 서버와의 연결이 종료되었습니다.');
+      } else if (status === 'error') {
+        showNotification('error', '연결 오류', '시그널링 서버와의 연결에 문제가 발생했습니다.');
+      }
+    },
+    onError: handleError
+  });
+
+  // 현재 사용 중인 WebRTC 객체 (mediasoup 또는 webrtc)
+  // 사용할 WebRTC 구현 선택 (mediasoup 또는 webrtc)
+  // 현재는 SFU 방식(mediasoup)을 사용
+  const rtc = clientId === 'A' ? webrtc : mediasoup;
+
+  // 미디어 타입 변경 시 서버에 알림
   const handleMediaTypeChange = (e) => {
     const value = e.target.value;
     setMediaType(value);
-    if (wsRef.current && wsRef.current.readyState === 1) {
-      wsRef.current.send(JSON.stringify({
-        type: 'mediaTypeChange',
-        client: selectedClient,
-        mediaType: value,
-      }));
-    }
+    localStorage.setItem('mediaType', value);
   };
 
-  // 미디어 타입에 따라 getUserMedia로 스트림 획득
-  useEffect(() => {
-    if (!isSender) {
-      setLocalStream(null);
-      return;
-    }
-    let constraints;
-    if (mediaType === 'audio') constraints = { audio: true, video: false };
-    else if (mediaType === 'video') constraints = { audio: false, video: true };
-    else constraints = { audio: true, video: true };
+  // 송출자 선택 변경 시 처리
+  const handleClientChange = (e) => {
+    const newClient = e.target.value;
+    setSelectedClient(newClient);
+    localStorage.setItem('selectedClient', newClient);
+    
+    // 이전 연결 종료
+    rtc.cleanup();
+    
+    // 즉시 새로고침하지 않고 페이지에 변경 사항 반영
+    showNotification('info', '클라이언트 역할 변경', `${newClient} 역할로 변경되었습니다. 시그널링 서버에 다시 연결하세요.`);
+  };
 
-    if (
-      typeof navigator !== 'undefined' &&
-      navigator.mediaDevices &&
-      typeof navigator.mediaDevices.getUserMedia === 'function'
-    ) {
-      navigator.mediaDevices.getUserMedia(constraints)
-        .then(stream => {
-          setLocalStream(stream);
-        })
-        .catch(err => {
-          setLocalStream(null);
-          console.error('미디어 획득 실패:', err);
-        });
-    } else {
-      setLocalStream(null);
-      console.error('getUserMedia를 지원하지 않는 환경입니다.');
+  // 비디오 엘리먼트에 로컬 스트림 연결
+  useEffect(() => {
+    if (videoRef.current && rtc.localStream) {
+      videoRef.current.srcObject = rtc.localStream;
     }
-    // 정리: 이전 스트림 정지
-    return () => {
-      if (localStream) {
-        localStream.getTracks().forEach(track => track.stop());
-      }
-    };
+  }, [rtc.localStream]);
+
+  // 원격 스트림 비디오 엘리먼트에 연결
+  useEffect(() => {
+    if (remoteVideoRef.current && rtc.remoteStream) {
+      remoteVideoRef.current.srcObject = rtc.remoteStream;
+    }
+  }, [rtc.remoteStream]);
+
+  // 송출자 모드에서 미디어 스트림 초기화
+  useEffect(() => {
+    if (isSender) {
+      rtc.initLocalStream();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mediaType, isSender]);
-
-  // 비디오 엘리먼트에 스트림 연결
-  useEffect(() => {
-    if (videoRef.current && localStream) {
-      videoRef.current.srcObject = localStream;
-    }
-  }, [localStream]);
-
-  // 수신자: 트랙 수신 시 remoteStream에 연결
-  useEffect(() => {
-    if (!isSender && pcRef.current) {
-      pcRef.current.ontrack = (event) => {
-        setRemoteStream(event.streams[0]);
-      };
-    }
-  }, [isSender, wsStatus]);
-
-  // remoteStream이 바뀌면 비디오/오디오 엘리먼트에 연결
-  useEffect(() => {
-    if (remoteVideoRef.current && remoteStream) {
-      remoteVideoRef.current.srcObject = remoteStream;
-    }
-  }, [remoteStream]);
-
-  // 시그널링 및 WebRTC 연결 뼈대
-  useEffect(() => {
-    if (wsStatus !== 'connected') return;
-    // PeerConnection 생성
-    const pc = createPeerConnection();
-
-    // 송출자(A)일 때: 트랙 추가 및 offer 생성/전송
-    if (isSender && localStream) {
-      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-      pc.onicecandidate = (event) => {
-        if (event.candidate && wsRef.current) {
-          wsRef.current.send(JSON.stringify({
-            type: 'ice-candidate',
-            candidate: event.candidate,
-            client: selectedClient,
-          }));
-        }
-      };
-      pc.createOffer().then(offer => {
-        pc.setLocalDescription(offer);
-        if (wsRef.current) {
-          wsRef.current.send(JSON.stringify({
-            type: 'offer',
-            offer,
-            client: selectedClient,
-            mediaType,
-          }));
-        }
-      });
-    }
-
-    // 수신자(B/C/D)일 때: 트랙 수신 핸들러
-    if (!isSender) {
-      pc.ontrack = (event) => {
-        // TODO: 수신 미디어 표시 (비디오/오디오)
-        // 예: setRemoteStream(event.streams[0]);
-      };
-      pc.onicecandidate = (event) => {
-        if (event.candidate && wsRef.current) {
-          wsRef.current.send(JSON.stringify({
-            type: 'ice-candidate',
-            candidate: event.candidate,
-            client: selectedClient,
-          }));
-        }
-      };
-    }
-
-    // 시그널링 메시지 수신 핸들러
-    const ws = wsRef.current;
-    if (!ws) return;
-    ws.onmessage = async (msg) => {
-      const data = JSON.parse(msg.data);
-      if (data.type === 'answer' && isSender) {
-        await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-      } else if (data.type === 'offer' && !isSender) {
-        await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        ws.send(JSON.stringify({
-          type: 'answer',
-          answer,
-          client: selectedClient,
-        }));
-      } else if (data.type === 'ice-candidate') {
-        try {
-          await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-        } catch (e) {
-          console.error('ICE candidate 추가 실패:', e);
-        }
-      } else if (data.type === 'transport-created') {
-        setTransportParams(data.params);
-        // TODO: PeerConnection에 transport 파라미터 적용 및 DTLS 교환
-      } else if (data.type === 'produced') {
-        setProduced(p => ({ ...p, [data.kind]: true }));
-      } else if (data.type === 'consumed') {
-        setConsumed({
-          audio: !!data.audio,
-          video: !!data.video,
-        });
-        // TODO: 수신 트랙을 PeerConnection에 연결
-      } else if (data.type === 'routerRtpCapabilities') {
-        setRouterRtpCapabilities(data.rtpCapabilities);
-      }
-      // ...기타 메시지 처리...
-    };
-
-    return () => {
-      pc.close();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsStatus, localStream, isSender, mediaType, selectedClient]);
+  }, [isSender, mediaType]);
 
   // sender-a 컨테이너에서는 시그널링 자동 연결
   useEffect(() => {
-    if (isSenderA && wsStatus !== 'connected') {
-      connectSignaling();
+    if (isSenderA && rtc.wsStatus !== 'connected') {
+      rtc.connectSignaling();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSenderA, wsStatus]);
-
-  // transport, producer, consumer 상태
-  const [transportParams, setTransportParams] = useState(null);
-  const [produced, setProduced] = useState({ audio: false, video: false });
-  const [consumed, setConsumed] = useState({ audio: false, video: false });
-  const [device, setDevice] = useState(null);
-  const [routerRtpCapabilities, setRouterRtpCapabilities] = useState(null);
-  const [deviceLoaded, setDeviceLoaded] = useState(false);
-
-  // mediasoup Device 생성 및 load
-  useEffect(() => {
-    if (!routerRtpCapabilities) return;
-    const dev = new Device();
-    dev.load({ routerRtpCapabilities })
-      .then(() => {
-        setDevice(dev);
-        setDeviceLoaded(true);
-        // 서버에 rtpCapabilities 전송(consume용)
-        if (wsRef.current && dev.rtpCapabilities) {
-          wsRef.current.send(JSON.stringify({
-            type: 'rtpCapabilities',
-            client: selectedClient,
-            rtpCapabilities: dev.rtpCapabilities,
-          }));
-        }
-      })
-      .catch((err) => {
-        setDeviceLoaded(false);
-        setDevice(null);
-        console.error('mediasoup Device load 실패:', err);
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [routerRtpCapabilities, selectedClient]);
-
-  // transport 생성 및 연결, produce/consume 자동화 예시
-  useEffect(() => {
-    if (!wsStatus === 'connected') return;
-    if (!deviceLoaded || !device || !transportParams) return;
-    let transport;
-    if (isSender) {
-      // 송출자: send transport 생성
-      transport = device.createSendTransport(transportParams);
-      transport.on('connect', ({ dtlsParameters }, callback, errback) => {
-        if (wsRef.current && wsRef.current.readyState === 1) {
-          wsRef.current.send(JSON.stringify({
-            type: 'connect-transport',
-            client: selectedClient,
-            dtlsParameters,
-          }));
-          callback();
-        } else {
-          errback(new Error('WebSocket not connected'));
-        }
-      });
-      transport.on('produce', async ({ kind, rtpParameters }, callback, errback) => {
-        if (wsRef.current && wsRef.current.readyState === 1) {
-          wsRef.current.send(JSON.stringify({
-            type: 'produce',
-            client: selectedClient,
-            kind,
-            rtpParameters
-          }));
-          callback({ id: `${kind}-producer-id` });
-        } else {
-          errback(new Error('WebSocket not connected'));
-        }
-      });
-      if (localStream) {
-        localStream.getTracks().forEach(track => {
-          if (!produced[track.kind]) {
-            transport.produce({ track });
-          }
-        });
-      }
-    } else {
-      // 수신자: recv transport 생성
-      transport = device.createRecvTransport(transportParams);
-      transport.on('connect', ({ dtlsParameters }, callback, errback) => {
-        if (wsRef.current && wsRef.current.readyState === 1) {
-          wsRef.current.send(JSON.stringify({
-            type: 'connect-transport',
-            client: selectedClient,
-            dtlsParameters,
-          }));
-          callback();
-        } else {
-          errback(new Error('WebSocket not connected'));
-        }
-      });
-      // 서버에 consume 요청
-      if (wsRef.current) {
-        wsRef.current.send(JSON.stringify({
-          type: 'consume',
-          client: selectedClient,
-          rtpCapabilities: device.rtpCapabilities,
-        }));
-      }
-      // 서버에서 consumed 응답 시 consumer 생성 및 트랙 연결
-      wsRef.current.onmessage = async (msg) => {
-        const data = JSON.parse(msg.data);
-        if (data.type === 'consumed') {
-          if (data.audio) {
-            const audioConsumer = await transport.consume({
-              id: data.audio.id,
-              producerId: data.audio.producerId,
-              kind: 'audio',
-              rtpParameters: data.audio.rtpParameters,
-            });
-            const remoteStream = new MediaStream([audioConsumer.track]);
-            setRemoteStream(remoteStream);
-          }
-          if (data.video) {
-            const videoConsumer = await transport.consume({
-              id: data.video.id,
-              producerId: data.video.producerId,
-              kind: 'video',
-              rtpParameters: data.video.rtpParameters,
-            });
-            const remoteStream = new MediaStream([videoConsumer.track]);
-            setRemoteStream(remoteStream);
-          }
-        }
-      };
-    }
-    // TODO: transport 이벤트 핸들링 및 트랙 연결
-    // 예: transport.on('connect', ...), transport.on('produce', ...)
-    // 예: consumer.on('track', ...)
-    // ...
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsStatus, deviceLoaded, device, transportParams, localStream, isSender]);
-
-  // mediasoup transport/produce/consume 자동화 및 이벤트 핸들링
-  useEffect(() => {
-    if (!deviceLoaded || !device || !transportParams) return;
-    let transport;
-    if (isSender) {
-      // 송출자: send transport 생성
-      transport = device.createSendTransport(transportParams);
-      transport.on('connect', ({ dtlsParameters }, callback, errback) => {
-        if (wsRef.current && wsRef.current.readyState === 1) {
-          wsRef.current.send(JSON.stringify({
-            type: 'connect-transport',
-            client: selectedClient,
-            dtlsParameters,
-          }));
-          callback();
-        } else {
-          errback(new Error('WebSocket not connected'));
-        }
-      });
-      transport.on('produce', async ({ kind, rtpParameters }, callback, errback) => {
-        if (wsRef.current && wsRef.current.readyState === 1) {
-          wsRef.current.send(JSON.stringify({
-            type: 'produce',
-            client: selectedClient,
-            kind,
-            rtpParameters
-          }));
-          callback({ id: `${kind}-producer-id` });
-        } else {
-          errback(new Error('WebSocket not connected'));
-        }
-      });
-      if (localStream) {
-        localStream.getTracks().forEach(track => {
-          if (!produced[track.kind]) {
-            transport.produce({ track });
-          }
-        });
-      }
-    } else {
-      // 수신자: recv transport 생성
-      transport = device.createRecvTransport(transportParams);
-      transport.on('connect', ({ dtlsParameters }, callback, errback) => {
-        if (wsRef.current && wsRef.current.readyState === 1) {
-          wsRef.current.send(JSON.stringify({
-            type: 'connect-transport',
-            client: selectedClient,
-            dtlsParameters,
-          }));
-          callback();
-        } else {
-          errback(new Error('WebSocket not connected'));
-        }
-      });
-      // 서버에 consume 요청
-      if (wsRef.current) {
-        wsRef.current.send(JSON.stringify({
-          type: 'consume',
-          client: selectedClient,
-          rtpCapabilities: device.rtpCapabilities,
-        }));
-      }
-      // 서버에서 consumed 응답 시 consumer 생성 및 트랙 연결
-      wsRef.current.onmessage = async (msg) => {
-        const data = JSON.parse(msg.data);
-        if (data.type === 'consumed') {
-          if (data.audio) {
-            const audioConsumer = await transport.consume({
-              id: data.audio.id,
-              producerId: data.audio.producerId,
-              kind: 'audio',
-              rtpParameters: data.audio.rtpParameters,
-            });
-            const remoteStream = new MediaStream([audioConsumer.track]);
-            setRemoteStream(remoteStream);
-          }
-          if (data.video) {
-            const videoConsumer = await transport.consume({
-              id: data.video.id,
-              producerId: data.video.producerId,
-              kind: 'video',
-              rtpParameters: data.video.rtpParameters,
-            });
-            const remoteStream = new MediaStream([videoConsumer.track]);
-            setRemoteStream(remoteStream);
-          }
-        }
-      };
-    }
-    // ...기존 useEffect cleanup 등...
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deviceLoaded, device, transportParams, localStream, isSender]);
-
-  // transport 생성 요청
-  const createTransport = () => {
-    if (wsRef.current && wsRef.current.readyState === 1) {
-      wsRef.current.send(JSON.stringify({ type: 'create-transport', client: selectedClient }));
-    }
-  };
-
-  // produce 요청 (A만)
-  const produceTrack = async (kind, rtpParameters) => {
-    if (wsRef.current && wsRef.current.readyState === 1) {
-      wsRef.current.send(JSON.stringify({
-        type: 'produce',
-        client: selectedClient,
-        kind,
-        rtpParameters,
-      }));
-    }
-  };
-
-  // consume 요청 (B/C/D만)
-  const consumeTrack = (rtpCapabilities) => {
-    if (wsRef.current && wsRef.current.readyState === 1) {
-      wsRef.current.send(JSON.stringify({
-        type: 'consume',
-        client: selectedClient,
-        rtpCapabilities,
-      }));
-    }
-  };
+  }, [isSenderA, rtc.wsStatus]);
 
   return (
     <div className="App">
       <h1>WebRTC SFU 테스트 클라이언트</h1>
+      <div className="app-version">v{APP_VERSION}</div>
+      
       {!isSenderA && (
-        <div>
+        <div className="control-group">
           <label>클라이언트 역할 선택: </label>
-          <select value={selectedClient} onChange={e => setSelectedClient(e.target.value)}>
+          <select value={selectedClient} onChange={handleClientChange}>
+            <option value="A">A (송출자)</option>
             {CLIENTS.map(c => (
               <option key={c.id} value={c.id}>{c.label}</option>
             ))}
           </select>
         </div>
       )}
-      <div>
+      
+      <div className="control-group">
         <label>미디어 타입 선택: </label>
         {isSenderA ? (
           <span>오디오+비디오 (고정)</span>
@@ -536,64 +192,139 @@ function App() {
           </select>
         )}
       </div>
-      <div style={{ margin: '1em 0' }}>
-        <button onClick={connectSignaling} disabled={wsStatus === 'connected'}>
-          {wsStatus === 'connected' ? '시그널링 연결됨' : '시그널링 서버 연결'}
+      
+      <div className="control-group">
+        <button 
+          onClick={rtc.connectSignaling}
+          disabled={rtc.wsStatus === 'connected'}
+          className={rtc.wsStatus === 'connected' ? 'connected' : ''}
+        >
+          {rtc.wsStatus === 'connected' ? '시그널링 연결됨' : '시그널링 서버 연결'}
         </button>
       </div>
-      <div style={{ margin: '1em 0' }}>
+      
+      <div className="control-group">
         <label>
           <input
             type="checkbox"
-            checked={useTurn}
-            onChange={e => setUseTurn(e.target.checked)}
+            checked={webrtc.useTurn}
+            onChange={e => webrtc.toggleTurn(e.target.checked)}
           />
           TURN 서버 사용 (기본: 해제, STUN만 사용)
         </label>
       </div>
-      <div style={{ margin: '1em 0' }}>
-        {wsStatus === 'connected' && (
-          <>
-            <button onClick={createTransport}>transport 생성</button>
-            {isSender && transportParams && (
-              <>
-                <button onClick={() => produceTrack('audio', {/* TODO: 실제 rtpParameters */})} disabled={produced.audio}>audio produce</button>
-                <button onClick={() => produceTrack('video', {/* TODO: 실제 rtpParameters */})} disabled={produced.video}>video produce</button>
-              </>
-            )}
-            {!isSender && transportParams && (
-              <button onClick={() => consumeTrack({/* TODO: 실제 rtpCapabilities */})} disabled={consumed.audio && consumed.video}>consume</button>
-            )}
-          </>
-        )}
-      </div>
-      <div style={{ margin: '1em 0' }}>
-        <label>로컬 미디어 미리보기:</label>
-        {isSender ? (
-          mediaType.includes('video') ? (
-            <video ref={videoRef} autoPlay playsInline muted style={{ width: 320, height: 240, background: '#222' }} />
-          ) : (
-            <audio ref={videoRef} autoPlay muted controls style={{ width: 320 }} />
-          )
-        ) : (
-          <span>수신자 역할(B/C/D)은 미리보기가 없습니다.</span>
-        )}
-      </div>
-      {/* 수신자(B/C/D) 미디어 표시 */}
-      {!isSender && (
-        <div style={{ margin: '1em 0' }}>
-          <label>수신 미디어:</label>
-          {mediaType.includes('video') ? (
-            <video ref={remoteVideoRef} autoPlay playsInline controls style={{ width: 320, height: 240, background: '#222' }} />
-          ) : (
-            <audio ref={remoteVideoRef} autoPlay controls style={{ width: 320 }} />
+      
+      {rtc.wsStatus === 'connected' && (
+        <div className="control-group">
+          <button onClick={rtc.createTransport}>transport 생성</button>
+          
+          {isSender && rtc.transportParams && (
+            <>
+              <button 
+                onClick={() => rtc.produceTrack('audio')} 
+                disabled={rtc.produced.audio}
+                className={rtc.produced.audio ? 'active' : ''}
+              >
+                {rtc.produced.audio ? '오디오 전송 중' : '오디오 전송 시작'}
+              </button>
+              
+              <button 
+                onClick={() => rtc.produceTrack('video')} 
+                disabled={rtc.produced.video}
+                className={rtc.produced.video ? 'active' : ''}
+              >
+                {rtc.produced.video ? '비디오 전송 중' : '비디오 전송 시작'}
+              </button>
+              
+              <button 
+                onClick={rtc.startSending}
+                disabled={rtc.produced.audio && rtc.produced.video}
+              >
+                미디어 전송
+              </button>
+            </>
+          )}
+          
+          {!isSender && rtc.transportParams && (
+            <button 
+              onClick={rtc.consumeTrack}
+              disabled={(rtc.consumed.audio && rtc.consumed.video) || !rtc.deviceLoaded}
+              className={(rtc.consumed.audio || rtc.consumed.video) ? 'active' : ''}
+            >
+              {!rtc.deviceLoaded ? 'device 로딩 중...' : (
+                (rtc.consumed.audio || rtc.consumed.video) ? '미디어 수신 중' : '미디어 수신 시작'
+              )}
+            </button>
           )}
         </div>
       )}
-      {/* TODO: WebRTC 연결 및 미디어 표시 영역 추가 예정 */}
-      <div>
-        <p>시그널링 상태: {wsStatus}</p>
+      
+      <div className="media-container">
+        <div className="media-preview">
+          <h3>로컬 미디어 미리보기:</h3>
+          {isSender ? (
+            mediaType.includes('video') ? (
+              <video 
+                ref={videoRef} 
+                autoPlay 
+                playsInline 
+                muted 
+                style={{ width: 320, height: 240, background: '#222' }} 
+              />
+            ) : (
+              <audio 
+                ref={videoRef} 
+                autoPlay 
+                muted 
+                controls 
+                style={{ width: 320 }} 
+              />
+            )
+          ) : (
+            <div className="no-preview">수신자 역할(B/C/D)은 미리보기가 없습니다.</div>
+          )}
+        </div>
+        
+        {!isSender && (
+          <div className="media-preview">
+            <h3>수신 미디어:</h3>
+            {mediaType.includes('video') ? (
+              <video 
+                ref={remoteVideoRef} 
+                autoPlay 
+                playsInline 
+                controls 
+                style={{ width: 320, height: 240, background: '#222' }} 
+              />
+            ) : (
+              <audio 
+                ref={remoteVideoRef} 
+                autoPlay 
+                controls 
+                style={{ width: 320 }} 
+              />
+            )}
+          </div>
+        )}
       </div>
+      
+      <div className="status-bar">
+        <p>시그널링 상태: <span className={`status-${rtc.wsStatus}`}>{rtc.wsStatus}</span></p>
+        {rtc.deviceLoaded && <p>미디어소프 디바이스: <span className="status-connected">로드됨</span></p>}
+        {rtc.transportParams && <p>Transport: <span className="status-connected">생성됨</span></p>}
+        {rtc.produced.audio && <p>오디오 송출: <span className="status-connected">활성</span></p>}
+        {rtc.produced.video && <p>비디오 송출: <span className="status-connected">활성</span></p>}
+        {rtc.consumed.audio && <p>오디오 수신: <span className="status-connected">활성</span></p>}
+        {rtc.consumed.video && <p>비디오 수신: <span className="status-connected">활성</span></p>}
+      </div>
+      
+      <Notification
+        show={notification.show}
+        type={notification.type}
+        title={notification.title}
+        message={notification.message}
+        onClose={closeNotification}
+      />
     </div>
   );
 }

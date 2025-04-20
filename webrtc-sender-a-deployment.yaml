@@ -24,6 +24,16 @@ spec:
           value: "A"
         - name: VITE_PORT
           value: "5175"
+        - name: VITE_TURN_SERVER
+          value: "20.214.122.119:3478"
+        - name: VITE_TURN_USERNAME
+          value: "testuser"
+        - name: VITE_TURN_CREDENTIAL
+          value: "testpass" 
+        - name: VITE_SFU_SERVER
+          value: "20.249.161.77"
+        - name: VITE_APP_VERSION
+          value: "1.0.0"
 ---
 apiVersion: v1
 kind: Service
